@@ -1,27 +1,19 @@
-import os, sys
+import math
+import os
 import platform
+import shutil
 import subprocess
 import tempfile
+import traceback
+
+import img2pdf
 from PyPDF2 import PdfFileMerger
-import shutil
-
-from PyQt5.QtWidgets import QMainWindow, QPushButton, QGridLayout, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, \
-    QListView, QListWidget, QFileDialog, QAbstractItemView, QMessageBox
-
-
-class FileScanner:
-    def __init__(self):
-        self.supported_types = [".pdf"]
-
-    def scan_files(self, dir_path):
-        # pdf file search
-        files = []
-        for root, dirnames, filenames in os.walk(dir_path):
-            for file in filenames:
-                fname, fext = os.path.splitext(file)
-                if fext.lower() in self.supported_types:
-                    files.append(os.path.join(root, file))
-        return files
+from PyQt5 import QtCore, QtGui
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPalette, QPainter, QBrush, QColor, QPen
+from PyQt5.QtWidgets import QPushButton, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, \
+    QListWidget, QFileDialog, QAbstractItemView, QMessageBox, QProgressDialog, QApplication
+from qtpy import QtWebEngineWidgets
 
 
 class CentralWidget(QWidget):
@@ -83,6 +75,123 @@ class CentralWidget(QWidget):
         central_widget_layout.addWidget(self.merge_button)
         self.setLayout(central_widget_layout)
 
+        self.progress_dialog = None
+
+        # conversion state
+        self.files_to_be_converted = []
+        self.tmp_dir = None
+        self.current_file_idx = -1
+        self.tmp_files = []
+
+    def get_supported_files(self):
+        return [".pdf", ".jpeg", ".jpg", ".bmp", ".html"]
+
+    def convert_next_file(self):
+        if self.progress_dialog.wasCanceled():
+            self.current_file_idx = len(self.files_to_be_converted)
+            return
+        self.progress_dialog.setValue(self.current_file_idx)
+        QApplication.processEvents()
+
+        if self.current_file_idx < len(self.files_to_be_converted):
+
+            file_path = self.files_to_be_converted[self.current_file_idx]
+            self.current_file_idx = self.current_file_idx + 1
+
+            file_name = str(self.current_file_idx).zfill(12)
+            _, file_ext = os.path.splitext(file_path)
+            tmp_file_path = os.path.join(self.tmp_dir, file_name + file_ext)
+
+            self.tmp_files.append(tmp_file_path)
+            if file_ext in [".jpeg", ".jpg", ".bmp"]:
+                with open(tmp_file_path, "wb") as f:
+                    f.write(img2pdf.convert(file_path))
+                self.convert_next_file()
+            elif file_ext in [".pdf"]:
+                shutil.copy2(file_path, tmp_file_path)
+                self.convert_next_file()
+            elif file_ext in [".html"]:
+                loader = QtWebEngineWidgets.QWebEngineView()
+                loader.setZoomFactor(1)
+                loader.load(QtCore.QUrl.fromLocalFile(file_path))
+
+                def pdf_convert_finished():
+                    self.convert_next_file()
+
+                def emit_pdf(finished):
+                    loader.page().printToPdf(tmp_file_path)
+
+                loader.page().pdfPrintingFinished.connect(pdf_convert_finished)
+                loader.loadFinished.connect(emit_pdf)
+        else:
+            # do the merge
+            merger = PdfFileMerger()
+
+            for file in self.tmp_files:
+                merger.append(file)
+            output_file_path = self.output_file_line_edit.text()
+            merger.write(output_file_path)
+            merger.close()
+
+            # clean up
+            shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+            # close progress dialog
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+            # show the success
+            reply = QMessageBox.information(self, "PdfMerge", "PDF Creation successful!",
+                                            QMessageBox.Ok | QMessageBox.Open)
+            if reply == QMessageBox.Open:
+                self.open_file(output_file_path)
+
+    def merge_button_clicked(self):
+        self.files_to_be_converted = []
+        self.tmp_dir = tempfile.mkdtemp()
+        self.current_file_idx = 0
+        self.tmp_files = []
+
+        for index in range(0, self.file_list.count()):
+            self.files_to_be_converted.append(self.file_list.item(index).text())
+
+        try:
+            self.progress_dialog = QProgressDialog("Processing ...", "Cancel", 0, len(self.files_to_be_converted), self)
+            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setAutoClose(False)
+            self.progress_dialog.setAutoReset(False)
+            self.progress_dialog.show()
+
+            self.convert_next_file()
+        except:
+            err = traceback.print_exc()
+            QMessageBox.critical(self, "An error occured", "PDF could not be generated. Error: {}".format(err))
+
+    def scan_files(self, dir_path):
+        self.progress_dialog = QProgressDialog("Processing ...", "Cancel", 0, 0, self)
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.show()
+        # pdf file search
+        files = []
+        i = 1
+        for root, dirnames, filenames in os.walk(dir_path):
+            for file in filenames:
+                if self.progress_dialog.wasCanceled():
+                    return []
+                self.progress_dialog.setValue(i)
+                QApplication.processEvents()
+
+                i = i + 1 if i < 100 else 0
+                fname, fext = os.path.splitext(file)
+                if fext.lower() in self.get_supported_files():
+                    files.append(os.path.join(root, file))
+
+        self.progress_dialog.close()
+        self.progress_dialog = None
+        return files
+
     def file_list_item_selection_changed(self):
         list_items = self.file_list.selectedItems()
         if not list_items:
@@ -102,8 +211,7 @@ class CentralWidget(QWidget):
         self.output_file_widget.setEnabled(False)
         dir = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if dir:
-            file_scanner = FileScanner()
-            files = file_scanner.scan_files(dir)
+            files = self.scan_files(dir)
             for file in files:
                 self.file_list.addItem(file)
             if len(files) > 0:
@@ -156,42 +264,6 @@ class CentralWidget(QWidget):
             self.merge_button.setEnabled(True)
         else:
             self.merge_button.setEnabled(False)
-
-    def merge_button_clicked(self):
-        list_items = []
-        for index in range(0, self.file_list.count()):
-            list_items.append(self.file_list.item(index))
-
-        # collect files in temp folder
-        tmp = tempfile.mkdtemp()
-        tmp_files = []
-        i = 1
-        for item in list_items:
-            file_path = item.text()
-            _, file_ext = os.path.splitext(file_path)
-            file_name = str(i).zfill(12)
-            tmp_file_path = os.path.join(tmp, file_name + file_ext)
-            # print("creating " + tmp_file_path)
-            shutil.copy2(file_path, tmp_file_path)
-            tmp_files.append(tmp_file_path)
-            i = i + 1
-
-        # do the merge
-        merger = PdfFileMerger()
-
-        for file in tmp_files:
-            merger.append(file)
-        output_file_path = self.output_file_line_edit.text()
-        merger.write(output_file_path)
-        merger.close()
-
-        # clean up
-        shutil.rmtree(tmp, ignore_errors=True)
-
-        # show the success
-        reply = QMessageBox.information(self, "PdfMerge", "PDF Creation successful!", QMessageBox.Ok | QMessageBox.Open)
-        if reply == QMessageBox.Open:
-            self.open_file(output_file_path)
 
     def open_file(self, filepath):
         if platform.system() == 'Darwin':  # macOS
