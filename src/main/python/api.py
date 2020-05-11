@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import traceback
 
+# import img2pdf
 import img2pdf
 from PyPDF2 import PdfFileMerger
 from PyQt5 import QtCore, QtGui
@@ -16,39 +17,88 @@ from PyQt5.QtWidgets import QPushButton, QWidget, QVBoxLayout, QHBoxLayout, QLin
 from qtpy import QtWebEngineWidgets
 
 
+class DragDropListWidget(QListWidget):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setAcceptDrops(True)
+
+    # The following three methods set up dragging and dropping for the app
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls:
+            e.accept()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls:
+            e.accept()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        """
+        Drop files directly onto the widget
+        File locations are stored in fname
+        :param e:
+        :return:
+        """
+        if e.mimeData().hasUrls:
+            e.setDropAction(QtCore.Qt.CopyAction)
+            e.accept()
+            # Workaround for OSx dragging and dropping
+            for url in e.mimeData().urls():
+                fname = str(url.toLocalFile())
+
+                self.addItem(fname)
+        else:
+            e.ignore()
+
+
 class CentralWidget(QWidget):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
         # build gui
         # the dir chooser
-        dir_line_edit = QLineEdit()
-        change_dir_button = QPushButton('Change Directory')
+        add_files_button = QPushButton('Add files')
+        add_files_button.clicked.connect(self.add_files_button_clicked)
+        change_dir_button = QPushButton('Scan Directory')
         change_dir_button.clicked.connect(self.change_dir_button_clicked)
         dir_chooser_layout = QHBoxLayout()
-        dir_chooser_layout.addWidget(dir_line_edit)
+        dir_chooser_layout.addWidget(add_files_button)
         dir_chooser_layout.addWidget(change_dir_button)
 
         # the file_list
-        self.file_list = QListWidget()
-        self.file_list.setEnabled(False)
+        self.file_list = DragDropListWidget()
+        # self.file_list.setEnabled(False)
         self.file_list.itemSelectionChanged.connect(self.file_list_item_selection_changed)
         self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.model().rowsInserted.connect(self.file_list_model_rows_inserted)
+        self.file_list.model().rowsRemoved.connect(self.file_list_model_rows_removed)
+        self.file_list.model().modelReset.connect(self.file_list_model_model_reset)
 
         # the file_list_action_bar
-        remove_file_button = QPushButton('Remove File')
-        remove_file_button.clicked.connect(self.remove_file_button_clicked)
+        self.remove_file_button = QPushButton('Remove File')
+        self.remove_file_button.clicked.connect(self.remove_file_button_clicked)
+        self.remove_file_button.setEnabled(False)
         self.move_up_button = QPushButton('Move Up')
         self.move_up_button.clicked.connect(self.move_up_button_clicked)
+        self.move_up_button.setEnabled(False)
         self.move_down_button = QPushButton('Move Down')
         self.move_down_button.clicked.connect(self.move_down_button_clicked)
+        self.move_down_button.setEnabled(False)
+        self.remove_all_button = QPushButton('Remove All')
+        self.remove_all_button.clicked.connect(self.remove_all_button_clicked)
+        self.remove_all_button.setEnabled(False)
         file_list_action_bar_layout = QHBoxLayout()
         file_list_action_bar_layout.setContentsMargins(0, 0, 0, 0);
-        file_list_action_bar_layout.addWidget(remove_file_button)
+        file_list_action_bar_layout.addWidget(self.remove_file_button)
         file_list_action_bar_layout.addWidget(self.move_up_button)
         file_list_action_bar_layout.addWidget(self.move_down_button)
+        file_list_action_bar_layout.addWidget(self.remove_all_button)
         self.file_list_action_bar_widget = QWidget()
         self.file_list_action_bar_widget.setLayout(file_list_action_bar_layout)
-        self.file_list_action_bar_widget.setEnabled(False)
 
         # the output_file_chooser
         self.output_file_line_edit = QLineEdit()
@@ -74,6 +124,7 @@ class CentralWidget(QWidget):
         central_widget_layout.addWidget(self.output_file_widget)
         central_widget_layout.addWidget(self.merge_button)
         self.setLayout(central_widget_layout)
+        self.setAcceptDrops(True)
 
         self.progress_dialog = None
 
@@ -85,6 +136,15 @@ class CentralWidget(QWidget):
 
     def get_supported_files(self):
         return [".pdf", ".jpeg", ".jpg", ".bmp", ".html"]
+
+    def file_list_model_rows_removed(self):
+        self.remove_all_button.setEnabled(self.file_list.count() > 0)
+
+    def file_list_model_rows_inserted(self):
+        self.remove_all_button.setEnabled(self.file_list.count() > 0)
+
+    def file_list_model_model_reset(self):
+        self.remove_all_button.setEnabled(False)
 
     def convert_next_file(self):
         if self.progress_dialog.wasCanceled():
@@ -195,19 +255,27 @@ class CentralWidget(QWidget):
     def file_list_item_selection_changed(self):
         list_items = self.file_list.selectedItems()
         if not list_items:
-            self.file_list_action_bar_widget.setEnabled(False)
+            self.move_down_button.setEnabled(False)
+            self.move_up_button.setEnabled(False)
+            self.remove_file_button.setEnabled(False)
         else:
-            self.file_list_action_bar_widget.setEnabled(True)
-            if len(list_items) > 1:
-                self.move_down_button.setEnabled(False)
-                self.move_up_button.setEnabled(False)
-            else:
-                self.move_down_button.setEnabled(True)
-                self.move_up_button.setEnabled(True)
+            self.remove_file_button.setEnabled(True)
+            self.move_down_button.setEnabled(len(list_items)  == 1)
+            self.move_up_button.setEnabled(len(list_items) == 1)
+
+    def add_files_button_clicked(self):
+        # self.file_list.clear()
+        file_types = "Supported Types ("
+        for supp_file_type in self.get_supported_files():
+            file_types = file_types + "*" + supp_file_type + " "
+        file_types = file_types + ")"
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files", "()", file_types)
+        for file in files:
+            self.file_list.addItem(file)
 
     def change_dir_button_clicked(self):
-        self.file_list.clear()
-        self.file_list.setEnabled(False)
+        # self.file_list.clear()
+        # self.file_list.setEnabled(False)
         self.output_file_widget.setEnabled(False)
         dir = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if dir:
@@ -215,8 +283,9 @@ class CentralWidget(QWidget):
             for file in files:
                 self.file_list.addItem(file)
             if len(files) > 0:
-                self.file_list.setEnabled(True)
+                # self.file_list.setEnabled(True)
                 self.output_file_widget.setEnabled(True)
+
 
     def remove_file_button_clicked(self):
         list_items = self.file_list.selectedItems()
@@ -224,6 +293,9 @@ class CentralWidget(QWidget):
             return
         for item in list_items:
             self.file_list.takeItem(self.file_list.row(item))
+
+    def remove_all_button_clicked(self):
+        self.file_list.clear()
 
     def move_up_button_clicked(self):
         list_items = self.file_list.selectedItems()
