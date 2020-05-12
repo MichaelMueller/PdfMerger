@@ -139,12 +139,15 @@ class CentralWidget(QWidget):
 
     def file_list_model_rows_removed(self):
         self.remove_all_button.setEnabled(self.file_list.count() > 0)
+        self.output_file_widget.setEnabled(self.file_list.count() > 0)
 
     def file_list_model_rows_inserted(self):
         self.remove_all_button.setEnabled(self.file_list.count() > 0)
+        self.output_file_widget.setEnabled(True)
 
     def file_list_model_model_reset(self):
         self.remove_all_button.setEnabled(False)
+        self.output_file_widget.setEnabled(False)
 
     def convert_next_file(self):
         if self.progress_dialog.wasCanceled():

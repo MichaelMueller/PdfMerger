@@ -17,8 +17,8 @@ if __name__ == '__main__':
     window.setWindowTitle(window_title)
     window.setCentralWidget(api.CentralWidget())
     window.resize(800, 600)
-    window.showMaximized()
-    # window.show()
+    # window.showMaximized()
+    window.show()
 
     # run
     # app_context.app.setStyleSheet(qdarkstyle.load_stylesheet())
